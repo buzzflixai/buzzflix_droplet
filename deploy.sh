@@ -3,6 +3,7 @@
 # Configuration
 APP_DIR=/opt/buzzflix_droplet
 LOG_DIR=/var/log/buzzflix_droplet
+PRISMA_DIR="$APP_DIR/.prisma"
 
 # Couleurs pour les logs
 GREEN='\033[0;32m'
@@ -37,6 +38,7 @@ apt install -y python3 python3-pip python3-venv
 log "Création des répertoires..."
 mkdir -p $APP_DIR
 mkdir -p $LOG_DIR
+mkdir -p $PRISMA_DIR
 
 # Configuration Python
 log "Configuration de l'environnement Python..."
@@ -55,23 +57,47 @@ cp /root/buzzflix_droplet/schema.prisma $APP_DIR/
 log "Configuration des permissions initiales..."
 chown -R www-data:www-data $APP_DIR
 chown -R www-data:www-data $LOG_DIR
+chmod -R 755 $APP_DIR
 
-# Génération du client Prisma avec www-data
+# Création d'un script de génération Prisma
+cat > $APP_DIR/generate_prisma.py << EOL
+from prisma import Prisma
+import asyncio
+import os
+
+async def test_prisma():
+    prisma = Prisma()
+    try:
+        await prisma.connect()
+        print("✅ Prisma connection test successful")
+        await prisma.disconnect()
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        raise e
+
+if __name__ == "__main__":
+    asyncio.run(test_prisma())
+EOL
+
+# Génération du client Prisma
 log "Génération du client Prisma..."
 cd $APP_DIR
-# Important: Générer le client avec l'utilisateur www-data
-sudo -u www-data bash -c "cd $APP_DIR && \
-    source venv/bin/activate && \
-    export PYTHONPATH=$APP_DIR && \
-    python3 -m prisma generate --schema=$APP_DIR/schema.prisma"
+export HOME=$APP_DIR  # Pour éviter l'utilisation de /var/www
+export PRISMA_HOME=$PRISMA_DIR
+export PYTHON_ENV=production
+export PYTHONPATH=$APP_DIR
 
-# Test d'importation avec www-data
-log "Test de l'importation Prisma..."
-sudo -u www-data bash -c "cd $APP_DIR && \
+# Génération avec permissions correctes
+sudo -E -u www-data bash -c "cd $APP_DIR && \
     source venv/bin/activate && \
-    export PYTHONPATH=$APP_DIR && \
-    python3 -c 'from prisma import Prisma; print(\"Prisma import successful\")'" || {
-        error "Échec de l'importation Prisma"
+    HOME=$APP_DIR PRISMA_HOME=$PRISMA_DIR python -m prisma generate"
+
+# Test de l'importation
+log "Test de l'importation Prisma..."
+sudo -E -u www-data bash -c "cd $APP_DIR && \
+    source venv/bin/activate && \
+    PYTHONPATH=$APP_DIR python3 generate_prisma.py" || {
+        error "Échec du test Prisma"
         exit 1
     }
 
@@ -90,6 +116,8 @@ WorkingDirectory=$APP_DIR
 Environment="PATH=$APP_DIR/venv/bin:/usr/bin"
 Environment="PYTHONPATH=$APP_DIR"
 Environment="PYTHONUNBUFFERED=1"
+Environment="HOME=$APP_DIR"
+Environment="PRISMA_HOME=$PRISMA_DIR"
 EnvironmentFile=$APP_DIR/.env
 
 ExecStart=/bin/bash -c 'cd $APP_DIR && \
@@ -112,21 +140,17 @@ WantedBy=multi-user.target
 EOL
 
 # Création des fichiers de log
-log "Configuration des logs..."
 touch $LOG_DIR/output.log
 touch $LOG_DIR/error.log
 touch $LOG_DIR/access.log
-chown -R www-data:www-data $LOG_DIR
-chmod -R 644 $LOG_DIR/*.log
 
 # Configuration finale des permissions
 log "Configuration finale des permissions..."
-find $APP_DIR -type d -exec chmod 755 {} \;
-find $APP_DIR -type f -exec chmod 644 {} \;
-chmod -R 755 $APP_DIR/venv/bin
-chmod 600 $APP_DIR/.env
 chown -R www-data:www-data $APP_DIR
 chown -R www-data:www-data $LOG_DIR
+chmod -R 755 $APP_DIR
+chmod 600 $APP_DIR/.env
+chmod -R 644 $LOG_DIR/*.log
 
 # Démarrage du service
 log "Démarrage du service..."
@@ -139,6 +163,7 @@ sleep 2
 if ! systemctl is-active --quiet buzzflix-droplet; then
     error "Le service n'a pas démarré correctement"
     journalctl -u buzzflix-droplet -n 50
+    cat $LOG_DIR/error.log
     exit 1
 fi
 
