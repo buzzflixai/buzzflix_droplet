@@ -75,18 +75,39 @@ Group=www-data
 WorkingDirectory=$APP_DIR
 Environment="PATH=$APP_DIR/venv/bin:$APP_DIR/node_modules/.bin:/usr/bin"
 Environment="PYTHONPATH=$APP_DIR"
+Environment="PYTHONUNBUFFERED=1"
 EnvironmentFile=$APP_DIR/.env
-ExecStart=$APP_DIR/venv/bin/gunicorn app:app \
+
+# Le chemin complet vers gunicorn est important
+ExecStart=$APP_DIR/venv/bin/gunicorn \
     --bind 0.0.0.0:5000 \
     --workers 1 \
-    --log-level=debug \
-    --access-logfile=$LOG_DIR/access.log \
-    --error-logfile=$LOG_DIR/error.log
+    --log-level debug \
+    --access-logfile $LOG_DIR/access.log \
+    --error-logfile $LOG_DIR/error.log \
+    --capture-output \
+    --chdir $APP_DIR \
+    app:app
+
 Restart=always
+RestartSec=1
+StandardOutput=append:$LOG_DIR/output.log
+StandardError=append:$LOG_DIR/error.log
 
 [Install]
 WantedBy=multi-user.target
 EOL
+
+# Création des fichiers de log s'ils n'existent pas
+touch $LOG_DIR/output.log
+touch $LOG_DIR/error.log
+touch $LOG_DIR/access.log
+
+# Permissions correctes sur les logs
+chown -R www-data:www-data $LOG_DIR
+chmod 644 $LOG_DIR/*.log
+EOL
+
 
 # Configuration des permissions
 log "Configuration des permissions..."
