@@ -5,25 +5,25 @@ import os
 import logging
 import sys
 import socket
+import uuid
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import SysLogHandler
-from prisma import Prisma
-from prisma.models import Series
+import psycopg2
+from psycopg2 import sql
 from dotenv import load_dotenv
 
 # Chargement des variables d'environnement
 load_dotenv()
+db_url = os.getenv('DATABASE_URL')
 
-# Configuration du logging avec formatage plus détaillé
+# Configuration du logging
 logger = logging.getLogger("buzzflix-server")
 logger.setLevel(logging.INFO)
 
-# Format de log plus détaillé
 log_format = '%(asctime)s [%(levelname)s] %(message)s - {%(pathname)s:%(lineno)d}'
 formatter = logging.Formatter(log_format)
 
-# Handler pour syslog
 try:
     syslog = SysLogHandler(address='/dev/log', facility=SysLogHandler.LOG_LOCAL0)
     syslog.setFormatter(formatter)
@@ -31,7 +31,6 @@ try:
 except (OSError, socket.error):
     logger.warning("Syslog non disponible, utilisation du stdout uniquement")
 
-# Handler pour stdout
 stdout = logging.StreamHandler(sys.stdout)
 stdout.setFormatter(formatter)
 logger.addHandler(stdout)
@@ -39,107 +38,154 @@ logger.addHandler(stdout)
 app = Flask(__name__)
 CORS(app)
 executor = ThreadPoolExecutor(max_workers=10)
-prisma = Prisma()
 
-def log_series_info(series: Series, message: str):
-    """Fonction utilitaire pour logger les informations de la série"""
-    subscription_info = series.user.subscription
-    plan_info = subscription_info.plan if subscription_info else None
-    
-    logger.info(f"""
-    {message}
-    ├── Series ID: {series.id}
-    ├── User ID: {series.userId}
-    ├── Theme: {series.theme}
-    ├── Status: {series.status}
-    ├── Frequency: {series.frequency} videos/week
-    ├── Subscription Plan: {plan_info.name if plan_info else 'No Plan'}
-    └── Destination: {series.destinationType}
-    """)
+def get_db_connection():
+    """Établit une connexion à la base de données"""
+    return psycopg2.connect(db_url)
 
-async def verify_series(series_id: str):
+def verify_series(series_id: str):
     """Vérifie la série et l'abonnement de l'utilisateur"""
     logger.info(f"🔍 Vérification de la série: {series_id}")
+    conn = get_db_connection()
+    cur = conn.cursor()
     
     try:
-        # Récupérer la série avec les informations de l'utilisateur et de l'abonnement
-        series = await prisma.series.find_unique(
-            where={
-                'id': series_id
-            },
-            include={
-                'user': {
-                    'include': {
-                        'subscription': {
-                            'include': {
-                                'plan': True
-                            }
-                        }
-                    }
-                }
-            }
-        )
-
+        # Requête avec les bons noms de colonnes selon le schéma
+        cur.execute("""
+            SELECT 
+                s.id, 
+                s."userId",
+                s.theme,
+                s.status,
+                s.frequency,
+                s."destinationType",
+                p.name as plan_name,
+                s."destinationId",
+                s."destinationEmail"
+            FROM "Series" s
+            JOIN "User" u ON s."userId" = u.id
+            LEFT JOIN "Subscription" sub ON u.id = sub."userId"
+            LEFT JOIN "Plan" p ON sub."planId" = p.id
+            WHERE s.id = %s
+            AND sub.status = 'active'
+            AND s.status = 'active'
+        """, (series_id,))
+        
+        series = cur.fetchone()
+        
         if not series:
             logger.error(f"❌ Série non trouvée: {series_id}")
             return None, "Series not found"
-
-        log_series_info(series, "✅ Série trouvée:")
-
-        if not series.user.subscription or not series.user.subscription.plan:
-            logger.error(f"❌ Pas d'abonnement actif pour l'utilisateur: {series.userId}")
+            
+        series_info = {
+            'id': series[0],
+            'userId': series[1],
+            'theme': series[2],
+            'status': series[3],
+            'frequency': series[4],
+            'destinationType': series[5],
+            'plan_name': series[6],
+            'destinationId': series[7],
+            'destinationEmail': series[8]
+        }
+        
+        if not series_info['plan_name']:
+            logger.error(f"❌ Pas d'abonnement actif pour l'utilisateur: {series_info['userId']}")
             return None, "No active subscription"
 
-        logger.info(f"✅ Plan vérifié: {series.user.subscription.plan.name}")
-        return series, None
-
+        logger.info(f"""
+        ✅ Série trouvée:
+        ├── Series ID: {series_info['id']}
+        ├── User ID: {series_info['userId']}
+        ├── Theme: {series_info['theme']}
+        ├── Status: {series_info['status']}
+        ├── Frequency: {series_info['frequency']} videos/week
+        ├── Plan: {series_info['plan_name']}
+        └── Destination: {series_info['destinationType']}
+        """)
+        
+        return series_info, None
+            
     except Exception as e:
         logger.error(f"❌ Erreur lors de la vérification de la série: {str(e)}", exc_info=True)
         return None, str(e)
+    finally:
+        cur.close()
+        conn.close()
 
-async def schedule_future_videos(series_id: str, frequency: int):
+def create_video_and_schedule(series_id: str, scheduled_time: datetime):
+    """Crée une nouvelle vidéo et sa planification"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        # Création de la vidéo avec ID unique
+        video_id = str(uuid.uuid4())
+        current_time = datetime.utcnow()
+        
+        cur.execute("""
+            INSERT INTO "Video" (
+                id, "seriesId", status, "createdAt", "updatedAt"
+            )
+            VALUES (%s, %s, 'pending', %s, %s)
+            RETURNING id
+        """, (video_id, series_id, current_time, current_time))
+        
+        video_id = cur.fetchone()[0]
+
+        # Création de la planification
+        schedule_id = str(uuid.uuid4())
+        cur.execute("""
+            INSERT INTO "PublicationSchedule" (
+                id, "seriesId", "videoId", "scheduledTime", platform, status, 
+                "createdAt", "updatedAt"
+            )
+            VALUES (%s, %s, %s, %s, 'tiktok', 'scheduled', %s, %s)
+            RETURNING id
+        """, (schedule_id, series_id, video_id, scheduled_time, current_time, current_time))
+        
+        schedule_id = cur.fetchone()[0]
+        conn.commit()
+        
+        return video_id, schedule_id
+        
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"❌ Erreur lors de la création vidéo/planning: {str(e)}")
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+def schedule_future_videos(series_id: str, frequency: int):
     """Planifie les futures vidéos pour la semaine"""
     logger.info(f"📅 Planification des futures vidéos pour la série: {series_id}")
+    scheduled_videos = []
+
     try:
         days_between_videos = 7 / frequency
         next_date = datetime.utcnow()
-        scheduled_videos = []
 
         for i in range(frequency):
             next_date = next_date + timedelta(days=days_between_videos)
             
-            # Créer une nouvelle vidéo
-            video = await prisma.video.create({
-                'data': {
-                    'seriesId': series_id,
-                    'status': 'pending'
-                }
-            })
-
-            # Créer la planification
-            schedule = await prisma.publicationschedule.create({
-                'data': {
-                    'seriesId': series_id,
-                    'videoId': video.id,
-                    'scheduledTime': next_date,
-                    'platform': 'tiktok',
-                    'status': 'scheduled'
-                }
-            })
+            # Créer une nouvelle vidéo et sa planification
+            video_id, schedule_id = create_video_and_schedule(series_id, next_date)
             
             scheduled_videos.append({
-                'video_id': video.id,
+                'video_id': video_id,
                 'scheduled_time': next_date.isoformat()
             })
             
             logger.info(f"""
             📽️ Vidéo planifiée:
-            ├── Video ID: {video.id}
-            ├── Schedule ID: {schedule.id}
+            ├── Video ID: {video_id}
+            ├── Schedule ID: {schedule_id}
             └── Date prévue: {next_date.isoformat()}
             """)
 
         return scheduled_videos
+        
     except Exception as e:
         logger.error(f"❌ Erreur lors de la planification des vidéos: {str(e)}", exc_info=True)
         return False
@@ -168,26 +214,15 @@ def trigger_lambda(payload):
     except Exception as e:
         logger.error(f"❌ Erreur lors du déclenchement de Lambda: {str(e)}", exc_info=True)
 
-@app.before_first_request
-async def connect_db():
-    """Initialise la connexion à la base de données"""
-    logger.info("🔌 Connexion à la base de données...")
-    try:
-        await prisma.connect()
-        logger.info("✅ Connexion à la base de données établie")
-    except Exception as e:
-        logger.error(f"❌ Erreur de connexion à la base de données: {str(e)}", exc_info=True)
-        raise
-
 @app.route('/create_series', methods=['POST'])
-async def create_series():
+def create_series():
     try:
         data = request.json
         series_id = data.get('series_id')
         logger.info(f"📥 Nouvelle requête de création pour la série: {series_id}")
 
         # Vérifier la série et l'abonnement
-        series, error = await verify_series(series_id)
+        series_info, error = verify_series(series_id)
         if error:
             return jsonify({
                 'status': 'error',
@@ -196,10 +231,12 @@ async def create_series():
 
         # Préparer le payload Lambda
         lambda_payload = {
-            'user_id': series.userId,
+            'user_id': series_info['userId'],
             'series_id': series_id,
             'video_id': data['video_id'],
-            'destination': data.get('destination', 'email'),
+            'destination': series_info['destinationType'],
+            'destination_id': series_info['destinationId'],
+            'destination_email': series_info['destinationEmail'],
             'theme': data['theme'],
             'voice': data['voice'],
             'language': data['language'],
@@ -211,9 +248,9 @@ async def create_series():
 
         scheduled_videos = []
         # Planification des vidéos futures pour les abonnements payants
-        if series.user.subscription.plan.name != 'FREE':
-            logger.info(f"💎 Abonnement premium détecté - Planification de {series.frequency} vidéos par semaine")
-            scheduled_videos = await schedule_future_videos(series_id, series.frequency)
+        if series_info['plan_name'] != 'FREE':
+            logger.info(f"💎 Abonnement premium détecté - Planification de {series_info['frequency']} vidéos par semaine")
+            scheduled_videos = schedule_future_videos(series_id, series_info['frequency'])
         else:
             logger.info("🆓 Abonnement gratuit - Génération unique")
 
@@ -221,9 +258,9 @@ async def create_series():
             'status': 'success',
             'message': 'Video generation started',
             'data': {
-                'plan_type': series.user.subscription.plan.name,
-                'is_free': series.user.subscription.plan.name == 'FREE',
-                'frequency': series.frequency,
+                'plan_type': series_info['plan_name'],
+                'is_free': series_info['plan_name'] == 'FREE',
+                'frequency': series_info['frequency'],
                 'scheduled_videos': scheduled_videos
             }
         }
