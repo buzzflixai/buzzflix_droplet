@@ -3,7 +3,6 @@
 # Configuration
 APP_DIR=/opt/buzzflix_droplet
 LOG_DIR=/var/log/buzzflix_droplet
-GEN_DIR="$APP_DIR/prisma/client"
 
 # Couleurs pour les logs
 GREEN='\033[0;32m'
@@ -30,13 +29,17 @@ rm -f /etc/systemd/system/buzzflix-droplet.service
 # Installation des dépendances système
 log "Installation des dépendances système..."
 apt update
-apt install -y python3 python3-pip python3-venv
+apt install -y python3 python3-pip python3-venv curl
+
+# Installation de Node.js (nécessaire pour prisma)
+log "Installation de Node.js..."
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt install -y nodejs
 
 # Création des répertoires
 log "Création des répertoires..."
 mkdir -p $APP_DIR
 mkdir -p $LOG_DIR
-mkdir -p $GEN_DIR
 cd $APP_DIR
 
 # Configuration Python
@@ -47,7 +50,7 @@ source venv/bin/activate
 # Installation des dépendances Python
 log "Installation des dépendances Python..."
 pip install wheel
-pip install flask flask-cors requests gunicorn prisma==0.9.1 python-dotenv
+pip install flask flask-cors requests gunicorn prisma python-dotenv
 
 # Copie des fichiers
 log "Copie des fichiers..."
@@ -55,32 +58,23 @@ cp /root/buzzflix_droplet/app.py $APP_DIR/
 cp /root/buzzflix_droplet/.env $APP_DIR/
 cp /root/buzzflix_droplet/schema.prisma $APP_DIR/
 
-# Génération et test de Prisma
+# Configuration de Node.js et Prisma
 log "Configuration de Prisma..."
 cd $APP_DIR
-export PRISMA_CLIENT_ENGINE_TYPE="binary"
-export PRISMA_CLIENT_ENGINE_PROTOCOL="graphql"
-export PRISMA_GENERATE_DATAPROXY="false"
+npm init -y
+npm install prisma @prisma/client
 
 # Génération du client Prisma
-cat > generate_client.py << EOL
-from prisma.cli import run_cli
-import os
-
-os.environ['PRISMA_CLIENT_ENGINE_TYPE'] = 'binary'
-run_cli(['generate'])
-EOL
-
 log "Génération du client Prisma..."
-python3 generate_client.py || {
-    error "Échec de la génération du client Prisma"
-    exit 1
-}
+export PRISMA_CLIENT_ENGINE_TYPE="binary"
+npx prisma generate
 
-# Test de l'importation
-log "Test de Prisma..."
+# Vérification de l'installation
+cd $APP_DIR
+source venv/bin/activate
 python3 -c "
 from prisma import Prisma
+prisma = Prisma()
 print('Prisma import successful')
 " || {
     error "Échec de l'importation Prisma"
@@ -99,14 +93,16 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=$APP_DIR
-Environment="PATH=$APP_DIR/venv/bin:/usr/bin"
+Environment="PATH=$APP_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="PYTHONPATH=$APP_DIR"
-Environment="PYTHONUNBUFFERED=1"
+Environment="NODE_PATH=$APP_DIR/node_modules"
 Environment="PRISMA_CLIENT_ENGINE_TYPE=binary"
+Environment="PYTHONUNBUFFERED=1"
 EnvironmentFile=$APP_DIR/.env
 
 ExecStart=/bin/bash -c 'cd $APP_DIR && \
     source venv/bin/activate && \
+    python3 -c "from prisma import Prisma; print(\"Prisma OK\")" && \
     exec gunicorn app:app \
     --bind 0.0.0.0:5000 \
     --workers 1 \
@@ -126,11 +122,18 @@ EOL
 
 # Configuration des permissions
 log "Configuration des permissions..."
+mkdir -p $APP_DIR/prisma
 chown -R www-data:www-data $APP_DIR
 chown -R www-data:www-data $LOG_DIR
 chmod -R 755 $APP_DIR
 chmod 600 $APP_DIR/.env
 chmod -R 644 $LOG_DIR/*.log
+
+# Création des fichiers de log
+touch $LOG_DIR/output.log
+touch $LOG_DIR/error.log
+touch $LOG_DIR/access.log
+chown www-data:www-data $LOG_DIR/*.log
 
 # Démarrage du service
 log "Démarrage du service..."
@@ -138,27 +141,25 @@ systemctl daemon-reload
 systemctl enable buzzflix-droplet
 systemctl start buzzflix-droplet
 
-# Test du service
-log "Test du service..."
+# Vérification
 sleep 5
 if systemctl is-active --quiet buzzflix-droplet; then
     log "Service démarré avec succès!"
-    curl -s localhost:5000 > /dev/null 2>&1
-    if [ $? -eq 0 ] || [ $? -eq 7 ]; then
-        log "API accessible!"
-    else
-        error "L'API ne répond pas"
-        systemctl status buzzflix-droplet
-        tail -n 50 $LOG_DIR/error.log
-    fi
+    log "API disponible sur http://$(curl -s ifconfig.me):5000"
 else
-    error "Le service n'a pas démarré. Logs:"
-    systemctl status buzzflix-droplet
-    tail -n 50 $LOG_DIR/error.log
+    error "Le service n'a pas démarré correctement. Logs:"
+    journalctl -u buzzflix-droplet -n 50
+    cat $LOG_DIR/error.log
 fi
+
+# Configuration du firewall
+log "Configuration du firewall..."
+ufw allow ssh
+ufw allow 5000
+ufw --force enable
 
 log "Installation terminée!"
 echo -e "\n${YELLOW}Commandes utiles:${NC}"
-echo "tail -f $LOG_DIR/access.log    # Logs d'accès"
-echo "tail -f $LOG_DIR/error.log     # Logs d'erreur"
-echo "systemctl status buzzflix-droplet # Status du service"
+echo "tail -f $LOG_DIR/access.log     # Logs d'accès"
+echo "tail -f $LOG_DIR/error.log      # Logs d'erreur"
+echo "systemctl status buzzflix-droplet  # Status du service"
