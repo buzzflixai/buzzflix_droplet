@@ -43,7 +43,7 @@ log "Configuration de l'environnement Python..."
 cd $APP_DIR
 python3 -m venv venv
 source venv/bin/activate
-pip install flask flask-cors requests gunicorn prisma==0.15.0 python-dotenv
+pip install flask flask-cors requests gunicorn prisma python-dotenv
 
 # Copie des fichiers
 log "Copie des fichiers..."
@@ -51,29 +51,29 @@ cp /root/buzzflix_droplet/app.py $APP_DIR/
 cp /root/buzzflix_droplet/.env $APP_DIR/
 cp /root/buzzflix_droplet/schema.prisma $APP_DIR/
 
-# Génération du client Prisma
+# Configuration des permissions initiales
+log "Configuration des permissions initiales..."
+chown -R www-data:www-data $APP_DIR
+chown -R www-data:www-data $LOG_DIR
+
+# Génération du client Prisma avec www-data
 log "Génération du client Prisma..."
 cd $APP_DIR
-# Assurez-vous d'être dans l'environnement virtuel
-source venv/bin/activate
-export PYTHONPATH=$APP_DIR
+# Important: Générer le client avec l'utilisateur www-data
+sudo -u www-data bash -c "cd $APP_DIR && \
+    source venv/bin/activate && \
+    export PYTHONPATH=$APP_DIR && \
+    python3 -m prisma generate --schema=$APP_DIR/schema.prisma"
 
-# Générer dans le bon répertoire
-python3 -m prisma generate --schema=$APP_DIR/schema.prisma
-
-# Vérifier la génération
-log "Vérification de la génération du client Prisma..."
-if [ ! -d "$APP_DIR/generated" ]; then
-    mkdir -p "$APP_DIR/generated"
-fi
-
-# Test de l'importation
-python3 -c "
-import sys
-sys.path.append('$APP_DIR')
-from prisma import Prisma
-print('✅ Prisma import successful')
-"
+# Test d'importation avec www-data
+log "Test de l'importation Prisma..."
+sudo -u www-data bash -c "cd $APP_DIR && \
+    source venv/bin/activate && \
+    export PYTHONPATH=$APP_DIR && \
+    python3 -c 'from prisma import Prisma; print(\"Prisma import successful\")'" || {
+        error "Échec de l'importation Prisma"
+        exit 1
+    }
 
 # Configuration du service
 log "Configuration du service systemd..."
@@ -89,15 +89,21 @@ Group=www-data
 WorkingDirectory=$APP_DIR
 Environment="PATH=$APP_DIR/venv/bin:/usr/bin"
 Environment="PYTHONPATH=$APP_DIR"
+Environment="PYTHONUNBUFFERED=1"
 EnvironmentFile=$APP_DIR/.env
-ExecStart=/bin/bash -c 'source $APP_DIR/venv/bin/activate && exec gunicorn app:app \
+
+ExecStart=/bin/bash -c 'cd $APP_DIR && \
+    source venv/bin/activate && \
+    exec gunicorn app:app \
     --bind 0.0.0.0:5000 \
     --workers 1 \
     --log-level debug \
     --access-logfile $LOG_DIR/access.log \
     --error-logfile $LOG_DIR/error.log \
     --capture-output'
+
 Restart=always
+RestartSec=5
 StandardOutput=append:$LOG_DIR/output.log
 StandardError=append:$LOG_DIR/error.log
 
@@ -106,20 +112,35 @@ WantedBy=multi-user.target
 EOL
 
 # Création des fichiers de log
-touch $LOG_DIR/output.log $LOG_DIR/error.log $LOG_DIR/access.log
-
-# Configuration des permissions
-log "Configuration des permissions..."
-chown -R www-data:www-data $APP_DIR
+log "Configuration des logs..."
+touch $LOG_DIR/output.log
+touch $LOG_DIR/error.log
+touch $LOG_DIR/access.log
 chown -R www-data:www-data $LOG_DIR
 chmod -R 644 $LOG_DIR/*.log
+
+# Configuration finale des permissions
+log "Configuration finale des permissions..."
+find $APP_DIR -type d -exec chmod 755 {} \;
+find $APP_DIR -type f -exec chmod 644 {} \;
+chmod -R 755 $APP_DIR/venv/bin
 chmod 600 $APP_DIR/.env
+chown -R www-data:www-data $APP_DIR
+chown -R www-data:www-data $LOG_DIR
 
 # Démarrage du service
 log "Démarrage du service..."
 systemctl daemon-reload
 systemctl enable buzzflix-droplet
 systemctl start buzzflix-droplet
+
+# Vérification du service
+sleep 2
+if ! systemctl is-active --quiet buzzflix-droplet; then
+    error "Le service n'a pas démarré correctement"
+    journalctl -u buzzflix-droplet -n 50
+    exit 1
+fi
 
 # Configuration du firewall
 log "Configuration du firewall..."
