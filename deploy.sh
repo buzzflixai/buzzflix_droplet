@@ -19,6 +19,25 @@ error() {
     echo -e "${RED}[$(date +'%Y-%m-%dT%H:%M:%S%z')] ❌ ERROR: $1${NC}"
 }
 
+# Installation de Node.js et npm
+install_nodejs() {
+    log "Installation de Node.js et npm..."
+    # Suppression des anciennes versions
+    apt-get remove -y nodejs npm
+    rm -rf /etc/apt/sources.list.d/nodesource.list
+    
+    # Installation de curl si nécessaire
+    apt-get install -y curl
+
+    # Installation de la dernière version LTS de Node.js
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    apt-get install -y nodejs
+
+    # Vérification de l'installation
+    node --version
+    npm --version
+}
+
 # Nettoyage complet
 log "Nettoyage de l'installation existante..."
 systemctl stop buzzflix-droplet 2>/dev/null
@@ -31,7 +50,10 @@ systemctl daemon-reload
 # Installation des dépendances système
 log "Installation des dépendances système..."
 apt update
-apt install -y python3 python3-pip python3-venv nodejs npm
+apt install -y python3 python3-pip python3-venv
+
+# Installation de Node.js
+install_nodejs
 
 # Création des répertoires
 log "Création des répertoires..."
@@ -77,8 +99,6 @@ Environment="PATH=$APP_DIR/venv/bin:$APP_DIR/node_modules/.bin:/usr/bin"
 Environment="PYTHONPATH=$APP_DIR"
 Environment="PYTHONUNBUFFERED=1"
 EnvironmentFile=$APP_DIR/.env
-
-# Le chemin complet vers gunicorn est important
 ExecStart=$APP_DIR/venv/bin/gunicorn \
     --bind 0.0.0.0:5000 \
     --workers 1 \
@@ -86,11 +106,8 @@ ExecStart=$APP_DIR/venv/bin/gunicorn \
     --access-logfile $LOG_DIR/access.log \
     --error-logfile $LOG_DIR/error.log \
     --capture-output \
-    --chdir $APP_DIR \
     app:app
-
 Restart=always
-RestartSec=1
 StandardOutput=append:$LOG_DIR/output.log
 StandardError=append:$LOG_DIR/error.log
 
@@ -98,21 +115,16 @@ StandardError=append:$LOG_DIR/error.log
 WantedBy=multi-user.target
 EOL
 
-# Création des fichiers de log s'ils n'existent pas
+# Création des fichiers de log
 touch $LOG_DIR/output.log
 touch $LOG_DIR/error.log
 touch $LOG_DIR/access.log
-
-# Permissions correctes sur les logs
-chown -R www-data:www-data $LOG_DIR
-chmod 644 $LOG_DIR/*.log
-EOL
-
 
 # Configuration des permissions
 log "Configuration des permissions..."
 chown -R www-data:www-data $APP_DIR
 chown -R www-data:www-data $LOG_DIR
+chmod 644 $LOG_DIR/*.log
 chmod 600 $APP_DIR/.env
 
 # Démarrage du service
