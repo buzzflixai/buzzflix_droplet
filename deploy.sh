@@ -19,25 +19,6 @@ error() {
     echo -e "${RED}[$(date +'%Y-%m-%dT%H:%M:%S%z')] ❌ ERROR: $1${NC}"
 }
 
-# Installation de Node.js et npm
-install_nodejs() {
-    log "Installation de Node.js et npm..."
-    # Suppression des anciennes versions
-    apt-get remove -y nodejs npm
-    rm -rf /etc/apt/sources.list.d/nodesource.list
-    
-    # Installation de curl si nécessaire
-    apt-get install -y curl
-
-    # Installation de la dernière version LTS de Node.js
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-    apt-get install -y nodejs
-
-    # Vérification de l'installation
-    node --version
-    npm --version
-}
-
 # Nettoyage complet
 log "Nettoyage de l'installation existante..."
 systemctl stop buzzflix-droplet 2>/dev/null
@@ -50,10 +31,7 @@ systemctl daemon-reload
 # Installation des dépendances système
 log "Installation des dépendances système..."
 apt update
-apt install -y python3 python3-pip python3-venv
-
-# Installation de Node.js
-install_nodejs
+apt install -y python3 python3-pip python3-venv nodejs npm
 
 # Création des répertoires
 log "Création des répertoires..."
@@ -73,15 +51,17 @@ cp /root/buzzflix_droplet/app.py $APP_DIR/
 cp /root/buzzflix_droplet/.env $APP_DIR/
 cp /root/buzzflix_droplet/schema.prisma $APP_DIR/
 
-# Configuration de Prisma
+# Configuration et génération de Prisma
 log "Configuration de Prisma..."
 cd $APP_DIR
-npm init -y
-npm install prisma @prisma/client
+source venv/bin/activate
 
-# Génération du client Prisma
+# Installation dans l'environnement virtuel
+python3 -m pip install prisma
+
+# Génération du client Prisma de manière explicite
 log "Génération du client Prisma..."
-npx prisma generate
+python3 -m prisma generate
 
 # Configuration du service
 log "Configuration du service systemd..."
@@ -95,18 +75,17 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=$APP_DIR
-Environment="PATH=$APP_DIR/venv/bin:$APP_DIR/node_modules/.bin:/usr/bin"
+Environment="PATH=$APP_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="PYTHONPATH=$APP_DIR"
 Environment="PYTHONUNBUFFERED=1"
 EnvironmentFile=$APP_DIR/.env
-ExecStart=$APP_DIR/venv/bin/gunicorn \
+ExecStart=/bin/bash -c 'source $APP_DIR/venv/bin/activate && exec gunicorn app:app \
     --bind 0.0.0.0:5000 \
     --workers 1 \
     --log-level debug \
     --access-logfile $LOG_DIR/access.log \
     --error-logfile $LOG_DIR/error.log \
-    --capture-output \
-    app:app
+    --capture-output'
 Restart=always
 StandardOutput=append:$LOG_DIR/output.log
 StandardError=append:$LOG_DIR/error.log
@@ -116,16 +95,23 @@ WantedBy=multi-user.target
 EOL
 
 # Création des fichiers de log
-touch $LOG_DIR/output.log
-touch $LOG_DIR/error.log
-touch $LOG_DIR/access.log
+touch $LOG_DIR/output.log $LOG_DIR/error.log $LOG_DIR/access.log
 
 # Configuration des permissions
 log "Configuration des permissions..."
 chown -R www-data:www-data $APP_DIR
 chown -R www-data:www-data $LOG_DIR
-chmod 644 $LOG_DIR/*.log
+chmod -R 644 $LOG_DIR/*.log
 chmod 600 $APP_DIR/.env
+
+# Test de l'importation de Prisma
+log "Test de Prisma..."
+cd $APP_DIR
+source venv/bin/activate
+python3 -c "from prisma import Prisma; print('Prisma import OK')" || {
+    error "Problème avec l'importation de Prisma"
+    exit 1
+}
 
 # Démarrage du service
 log "Démarrage du service..."
