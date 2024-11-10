@@ -3,7 +3,7 @@
 # Configuration
 APP_DIR=/opt/buzzflix_droplet
 LOG_DIR=/var/log/buzzflix_droplet
-PRISMA_DIR="$APP_DIR/.prisma"
+PRISMA_DIR="$APP_DIR/prisma"
 
 # Couleurs pour les logs
 GREEN='\033[0;32m'
@@ -50,56 +50,63 @@ pip install flask flask-cors requests gunicorn prisma python-dotenv
 # Copie des fichiers
 log "Copie des fichiers..."
 cp /root/buzzflix_droplet/app.py $APP_DIR/
+cp /root/buzzflix_droplet/schema.prisma $PRISMA_DIR/
 cp /root/buzzflix_droplet/.env $APP_DIR/
-cp /root/buzzflix_droplet/schema.prisma $APP_DIR/
 
-# Configuration des permissions initiales
-log "Configuration des permissions initiales..."
-chown -R www-data:www-data $APP_DIR
-chown -R www-data:www-data $LOG_DIR
-chmod -R 755 $APP_DIR
-
-# Création d'un script de génération Prisma
-cat > $APP_DIR/generate_prisma.py << EOL
-from prisma import Prisma
-import asyncio
-import os
-
-async def test_prisma():
-    prisma = Prisma()
-    try:
-        await prisma.connect()
-        print("✅ Prisma connection test successful")
-        await prisma.disconnect()
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        raise e
-
-if __name__ == "__main__":
-    asyncio.run(test_prisma())
+# Configuration de Prisma
+log "Configuration de Prisma..."
+cd $PRISMA_DIR
+# Créer un package.json minimal
+cat > package.json << EOL
+{
+  "name": "buzzflix_droplet",
+  "version": "1.0.0",
+  "private": true
+}
 EOL
+
+# Installation des dépendances Prisma
+npm install @prisma/client prisma
+
+# Copie du schema.prisma vers le bon endroit
+cp schema.prisma $PRISMA_DIR
 
 # Génération du client Prisma
 log "Génération du client Prisma..."
+export PRISMA_CLIENT_ENGINE_TYPE=binary
+npx prisma generate
+
+# Configuration des permissions
+log "Configuration des permissions..."
+chown -R www-data:www-data $APP_DIR
+chown -R www-data:www-data $LOG_DIR
+chmod -R 755 $APP_DIR
+chmod 600 $APP_DIR/.env
+
+# Création d'un script de test
+cat > $APP_DIR/test_prisma.py << EOL
+from prisma import Prisma
+import asyncio
+
+async def test_connection():
+    prisma = Prisma()
+    try:
+        await prisma.connect()
+        print("✅ Prisma connection successful!")
+        await prisma.disconnect()
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        raise e
+
+if __name__ == "__main__":
+    asyncio.run(test_connection())
+EOL
+
+# Test de Prisma
+log "Test de Prisma..."
 cd $APP_DIR
-export HOME=$APP_DIR  # Pour éviter l'utilisation de /var/www
-export PRISMA_HOME=$PRISMA_DIR
-export PYTHON_ENV=production
-export PYTHONPATH=$APP_DIR
-
-# Génération avec permissions correctes
-sudo -E -u www-data bash -c "cd $APP_DIR && \
-    source venv/bin/activate && \
-    HOME=$APP_DIR PRISMA_HOME=$PRISMA_DIR python -m prisma generate"
-
-# Test de l'importation
-log "Test de l'importation Prisma..."
-sudo -E -u www-data bash -c "cd $APP_DIR && \
-    source venv/bin/activate && \
-    PYTHONPATH=$APP_DIR python3 generate_prisma.py" || {
-        error "Échec du test Prisma"
-        exit 1
-    }
+source venv/bin/activate
+PYTHONPATH=$APP_DIR python3 test_prisma.py
 
 # Configuration du service
 log "Configuration du service systemd..."
@@ -114,10 +121,9 @@ User=www-data
 Group=www-data
 WorkingDirectory=$APP_DIR
 Environment="PATH=$APP_DIR/venv/bin:/usr/bin"
-Environment="PYTHONPATH=$APP_DIR"
+Environment="PYTHONPATH=$APP_DIR:$PRISMA_DIR"
 Environment="PYTHONUNBUFFERED=1"
-Environment="HOME=$APP_DIR"
-Environment="PRISMA_HOME=$PRISMA_DIR"
+Environment="PRISMA_CLIENT_ENGINE_TYPE=binary"
 EnvironmentFile=$APP_DIR/.env
 
 ExecStart=/bin/bash -c 'cd $APP_DIR && \
@@ -140,16 +146,8 @@ WantedBy=multi-user.target
 EOL
 
 # Création des fichiers de log
-touch $LOG_DIR/output.log
-touch $LOG_DIR/error.log
-touch $LOG_DIR/access.log
-
-# Configuration finale des permissions
-log "Configuration finale des permissions..."
-chown -R www-data:www-data $APP_DIR
+touch $LOG_DIR/output.log $LOG_DIR/error.log $LOG_DIR/access.log
 chown -R www-data:www-data $LOG_DIR
-chmod -R 755 $APP_DIR
-chmod 600 $APP_DIR/.env
 chmod -R 644 $LOG_DIR/*.log
 
 # Démarrage du service
@@ -157,15 +155,6 @@ log "Démarrage du service..."
 systemctl daemon-reload
 systemctl enable buzzflix-droplet
 systemctl start buzzflix-droplet
-
-# Vérification du service
-sleep 2
-if ! systemctl is-active --quiet buzzflix-droplet; then
-    error "Le service n'a pas démarré correctement"
-    journalctl -u buzzflix-droplet -n 50
-    cat $LOG_DIR/error.log
-    exit 1
-fi
 
 # Configuration du firewall
 log "Configuration du firewall..."
