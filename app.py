@@ -68,7 +68,6 @@ def verify_series(series_id: str):
             LEFT JOIN "Plan" p ON sub."planId" = p.id
             WHERE s.id = %s
             AND sub.status = 'active'
-            AND s.status = 'active'
         """, (series_id,))
         
         series = cur.fetchone()
