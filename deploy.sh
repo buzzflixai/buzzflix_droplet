@@ -2,7 +2,8 @@
 
 # Configuration
 APP_DIR=/opt/buzzflix_droplet
-LOG_DIR=/var/log/buzzflix_droplet
+LOG_FILE=/var/log/buzzflix.log
+
 BACKUP_DIR=/opt/buzzflix_backup
 
 # Couleurs pour les logs
@@ -50,7 +51,7 @@ log "Nettoyage de l'installation existante..."
 systemctl stop buzzflix-droplet 2>/dev/null || true
 systemctl disable buzzflix-droplet 2>/dev/null || true
 rm -rf $APP_DIR
-rm -rf $LOG_DIR
+rm -f $LOG_FILE
 rm -f /etc/systemd/system/buzzflix-droplet.service
 
 # Installation des dépendances système
@@ -80,11 +81,11 @@ log "Copie des fichiers..."
 cp /root/buzzflix_droplet/app.py $APP_DIR/
 cp /root/buzzflix_droplet/.env $APP_DIR/
 
-# Création des fichiers de log
+# Configuration des logs
 log "Configuration des logs..."
-touch $LOG_DIR/access.log
-touch $LOG_DIR/error.log
-touch $LOG_DIR/app.log
+touch $LOG_FILE
+chmod 644 $LOG_FILE
+chown www-data:www-data $LOG_FILE
 
 # Configuration du service systemd
 log "Configuration du service systemd..."
@@ -108,18 +109,19 @@ ExecStart=$APP_DIR/venv/bin/gunicorn app:app \
     --workers 1 \
     --timeout 120 \
     --log-level debug \
-    --access-logfile $LOG_DIR/access.log \
-    --error-logfile $LOG_DIR/error.log \
-    --capture-output
+    --capture-output \
+    --access-logfile $LOG_FILE \
+    --error-logfile $LOG_FILE
 
 Restart=always
 RestartSec=5
-StandardOutput=append:$LOG_DIR/app.log
-StandardError=append:$LOG_DIR/error.log
+StandardOutput=append:$LOG_FILE
+StandardError=append:$LOG_FILE
 
 [Install]
 WantedBy=multi-user.target
 EOL
+
 
 # Configuration des permissions
 log "Configuration des permissions..."
@@ -171,9 +173,8 @@ echo "App Directory: $APP_DIR"
 echo "Logs Directory: $LOG_DIR"
 
 echo -e "\n${YELLOW}=== Commandes utiles ===${NC}"
-echo "📋 Logs d'accès:     tail -f $LOG_DIR/access.log"
-echo "📋 Logs d'erreur:    tail -f $LOG_DIR/error.log"
-echo "📋 Logs application: tail -f $LOG_DIR/app.log"
+echo -e "\n${YELLOW}Pour voir les logs en temps réel:${NC}"
+echo "tail -f $LOG_FILE"
 echo "📋 Status service:   systemctl status buzzflix-droplet"
 echo "📋 Redémarrer:      systemctl restart buzzflix-droplet"
 

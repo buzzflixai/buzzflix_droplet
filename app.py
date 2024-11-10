@@ -17,27 +17,23 @@ from dotenv import load_dotenv
 load_dotenv()
 db_url = os.getenv('DATABASE_URL')
 
-# Configuration du logging
-logger = logging.getLogger("buzzflix-server")
+# Configuration du logging centralisé
+logger = logging.getLogger("buzzflix")
 logger.setLevel(logging.INFO)
 
-log_format = '%(asctime)s [%(levelname)s] %(message)s - {%(pathname)s:%(lineno)d}'
+# Format de log unifié avec emojis et informations détaillées
+log_format = '%(asctime)s [%(levelname)s] %(message)s'
 formatter = logging.Formatter(log_format)
 
-try:
-    syslog = SysLogHandler(address='/dev/log', facility=SysLogHandler.LOG_LOCAL0)
-    syslog.setFormatter(formatter)
-    logger.addHandler(syslog)
-except (OSError, socket.error):
-    logger.warning("Syslog non disponible, utilisation du stdout uniquement")
-
-stdout = logging.StreamHandler(sys.stdout)
-stdout.setFormatter(formatter)
-logger.addHandler(stdout)
+# Un seul handler pour le fichier de log
+file_handler = logging.FileHandler('/var/log/buzzflix.log')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
 
 app = Flask(__name__)
 CORS(app)
 executor = ThreadPoolExecutor(max_workers=10)
+
 
 def get_db_connection():
     """Établit une connexion à la base de données"""
