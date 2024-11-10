@@ -70,11 +70,12 @@ cd $APP_DIR
 python3 -m venv venv
 source venv/bin/activate
 
-# Installation des dépendances Python
+# Dans la section d'installation des dépendances Python, remplacer par :
 log "Installation des dépendances Python..."
 pip install --upgrade pip
 pip install wheel
-pip install flask flask-cors requests gunicorn psycopg2-binary python-dotenv
+pip install flask flask-cors requests "gunicorn[gthread]" psycopg2-binary python-dotenv
+
 
 # Copie des fichiers
 log "Copie des fichiers..."
@@ -107,12 +108,17 @@ EnvironmentFile=$APP_DIR/.env
 ExecStart=$APP_DIR/venv/bin/gunicorn app:app \
     --bind 0.0.0.0:5000 \
     --workers 1 \
+    --threads 2 \
     --timeout 120 \
     --log-level debug \
     --capture-output \
     --access-logfile $LOG_FILE \
-    --error-logfile $LOG_FILE
+    --error-logfile $LOG_FILE \
+    --worker-class gthread
 
+# Important pour les threads daemon
+KillMode=mixed
+TimeoutStopSec=5
 Restart=always
 RestartSec=5
 StandardOutput=append:$LOG_FILE
@@ -121,7 +127,6 @@ StandardError=append:$LOG_FILE
 [Install]
 WantedBy=multi-user.target
 EOL
-
 
 # Configuration des permissions
 log "Configuration des permissions..."
