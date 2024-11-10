@@ -3,7 +3,6 @@
 # Configuration
 APP_DIR=/opt/buzzflix_droplet
 LOG_DIR=/var/log/buzzflix_droplet
-PRISMA_DIR="$APP_DIR/prisma"
 
 # Couleurs pour les logs
 GREEN='\033[0;32m'
@@ -11,7 +10,6 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# Fonctions de logging
 log() {
     echo -e "${GREEN}[$(date +'%Y-%m-%dT%H:%M:%S%z')] ✅ $1${NC}"
 }
@@ -20,93 +18,45 @@ error() {
     echo -e "${RED}[$(date +'%Y-%m-%dT%H:%M:%S%z')] ❌ ERROR: $1${NC}"
 }
 
-# Nettoyage complet
+# Arrêt et nettoyage
 log "Nettoyage de l'installation existante..."
-systemctl stop buzzflix-droplet 2>/dev/null
-systemctl disable buzzflix-droplet 2>/dev/null
+systemctl stop buzzflix-droplet 2>/dev/null || true
+systemctl disable buzzflix-droplet 2>/dev/null || true
 rm -rf $APP_DIR
 rm -rf $LOG_DIR
 rm -f /etc/systemd/system/buzzflix-droplet.service
-systemctl daemon-reload
-
-# Installation des dépendances système
-log "Installation des dépendances système..."
-apt update
-apt install -y python3 python3-pip python3-venv
 
 # Création des répertoires
 log "Création des répertoires..."
 mkdir -p $APP_DIR
 mkdir -p $LOG_DIR
-mkdir -p $PRISMA_DIR
+cd $APP_DIR
 
 # Configuration Python
 log "Configuration de l'environnement Python..."
-cd $APP_DIR
 python3 -m venv venv
 source venv/bin/activate
+
+# Installation des dépendances
+log "Installation des dépendances..."
+pip install wheel
 pip install flask flask-cors requests gunicorn prisma python-dotenv
 
 # Copie des fichiers
 log "Copie des fichiers..."
 cp /root/buzzflix_droplet/app.py $APP_DIR/
-cp /root/buzzflix_droplet/schema.prisma $PRISMA_DIR/
+cp /root/buzzflix_droplet/schema.prisma $APP_DIR/
 cp /root/buzzflix_droplet/.env $APP_DIR/
 
-# Configuration de Prisma
+# Configuration et génération de Prisma
 log "Configuration de Prisma..."
-cd $PRISMA_DIR
-# Créer un package.json minimal
-cat > package.json << EOL
-{
-  "name": "buzzflix_droplet",
-  "version": "1.0.0",
-  "private": true
-}
-EOL
-
-# Installation des dépendances Prisma
-npm install @prisma/client prisma
-
-# Copie du schema.prisma vers le bon endroit
-cp schema.prisma $PRISMA_DIR
-
-# Génération du client Prisma
-log "Génération du client Prisma..."
-export PRISMA_CLIENT_ENGINE_TYPE=binary
-npx prisma generate
-
-# Configuration des permissions
-log "Configuration des permissions..."
-chown -R www-data:www-data $APP_DIR
-chown -R www-data:www-data $LOG_DIR
-chmod -R 755 $APP_DIR
-chmod 600 $APP_DIR/.env
-
-# Création d'un script de test
-cat > $APP_DIR/test_prisma.py << EOL
-from prisma import Prisma
-import asyncio
-
-async def test_connection():
-    prisma = Prisma()
-    try:
-        await prisma.connect()
-        print("✅ Prisma connection successful!")
-        await prisma.disconnect()
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        raise e
-
-if __name__ == "__main__":
-    asyncio.run(test_connection())
-EOL
-
-# Test de Prisma
-log "Test de Prisma..."
 cd $APP_DIR
+python3 -m prisma generate --schema=schema.prisma
+
+# Vérification de Prisma
+log "Vérification de l'installation..."
 source venv/bin/activate
-PYTHONPATH=$APP_DIR python3 test_prisma.py
+python3 -c "from prisma import Prisma; print('Prisma import successful')"
 
 # Configuration du service
 log "Configuration du service systemd..."
@@ -121,20 +71,18 @@ User=www-data
 Group=www-data
 WorkingDirectory=$APP_DIR
 Environment="PATH=$APP_DIR/venv/bin:/usr/bin"
-Environment="PYTHONPATH=$APP_DIR:$PRISMA_DIR"
+Environment="PYTHONPATH=$APP_DIR"
 Environment="PYTHONUNBUFFERED=1"
-Environment="PRISMA_CLIENT_ENGINE_TYPE=binary"
 EnvironmentFile=$APP_DIR/.env
 
-ExecStart=/bin/bash -c 'cd $APP_DIR && \
-    source venv/bin/activate && \
-    exec gunicorn app:app \
+ExecStart=$APP_DIR/venv/bin/gunicorn app:app \
     --bind 0.0.0.0:5000 \
     --workers 1 \
+    --worker-class=sync \
+    --timeout 120 \
     --log-level debug \
     --access-logfile $LOG_DIR/access.log \
-    --error-logfile $LOG_DIR/error.log \
-    --capture-output'
+    --error-logfile $LOG_DIR/error.log
 
 Restart=always
 RestartSec=5
@@ -145,9 +93,18 @@ StandardError=append:$LOG_DIR/error.log
 WantedBy=multi-user.target
 EOL
 
-# Création des fichiers de log
-touch $LOG_DIR/output.log $LOG_DIR/error.log $LOG_DIR/access.log
+# Configuration des logs
+log "Configuration des logs..."
+touch $LOG_DIR/output.log
+touch $LOG_DIR/error.log
+touch $LOG_DIR/access.log
+
+# Configuration des permissions
+log "Configuration des permissions..."
+chown -R www-data:www-data $APP_DIR
 chown -R www-data:www-data $LOG_DIR
+chmod -R 755 $APP_DIR
+chmod 600 $APP_DIR/.env
 chmod -R 644 $LOG_DIR/*.log
 
 # Démarrage du service
@@ -162,8 +119,18 @@ ufw allow ssh
 ufw allow 5000
 ufw --force enable
 
+# Vérification du service
+sleep 2
+if systemctl is-active --quiet buzzflix-droplet; then
+    log "Service démarré avec succès!"
+    log "L'API est accessible sur http://$(curl -s ifconfig.me):5000"
+else
+    error "Le service n'a pas démarré correctement"
+    journalctl -u buzzflix-droplet -n 50
+fi
+
 log "Installation terminée!"
-echo -e "${YELLOW}Pour voir les logs:${NC}"
-echo "tail -f $LOG_DIR/access.log"
-echo "tail -f $LOG_DIR/error.log"
-echo "systemctl status buzzflix-droplet"
+echo -e "\n${YELLOW}Commandes utiles:${NC}"
+echo "tail -f $LOG_DIR/access.log     # Logs d'accès"
+echo "tail -f $LOG_DIR/error.log      # Logs d'erreur"
+echo "systemctl status buzzflix-droplet  # Status du service"
