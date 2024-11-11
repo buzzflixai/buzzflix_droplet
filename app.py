@@ -307,7 +307,7 @@ class TikTokTokenRefresher:
             
             # Vérifier toutes les heures
             logger.info("💤 Pause de 1 heure avant prochaine vérification...")
-            time.sleep(3600)
+            time.sleep(300)
 
 
 # initialisation de l'application
