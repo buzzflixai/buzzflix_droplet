@@ -175,6 +175,144 @@ class VideoAutoScheduler:
             logger.info("💤 Pause de 5 minutes...")
             time.sleep(300)
 
+
+
+
+
+
+class TikTokTokenRefresher:
+    def __init__(self):
+        logger.info("🔄 Démarrage du TikTokTokenRefresher")
+        self.client_key = os.getenv('AUTH_TIKTOK_ID')
+        self.client_secret = os.getenv('AUTH_TIKTOK_SECRET')
+        self.worker = Thread(target=self.refresh_tokens_loop, daemon=True)
+        self.worker.start()
+        logger.info("✅ Thread de refresh des tokens démarré")
+
+    def refresh_token(self, refresh_token: str) -> dict:
+        """Rafraîchit un token TikTok"""
+        try:
+            logger.info("🔄 Tentative de rafraîchissement du token")
+            
+            response = requests.post(
+                "https://open.tiktokapis.com/v2/oauth/token/",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "client_key": self.client_key,
+                    "client_secret": self.client_secret,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token
+                }
+            )
+            
+            if not response.ok:
+                logger.error(f"""
+                ❌ Erreur de rafraîchissement:
+                ├── Status: {response.status_code}
+                └── Response: {response.text}
+                """)
+                return None
+
+            data = response.json()
+            logger.info("✅ Token rafraîchi avec succès")
+            return {
+                'access_token': data['access_token'],
+                'refresh_token': data.get('refresh_token', refresh_token),
+                'expires_in': data.get('expires_in', 86400)
+            }
+            
+        except Exception as e:
+            logger.error(f"""
+            ❌ Erreur lors du rafraîchissement:
+            ├── Type: {type(e).__name__}
+            └── Message: {str(e)}
+            """)
+            return None
+
+    def refresh_tokens_loop(self):
+        """Boucle principale de rafraîchissement des tokens"""
+        while True:
+            try:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                
+                logger.info("🔍 Recherche des comptes TikTok à rafraîchir...")
+                
+                # Chercher les comptes dont le token expire dans moins de 6 heures
+                cur.execute("""
+                    SELECT 
+                        id, "userId", "refreshToken", "tokenExpiresAt"
+                    FROM "SocialAccount"
+                    WHERE platform = 'TIKTOK'
+                    AND "tokenExpiresAt" IS NOT NULL
+                """)
+                
+                accounts = cur.fetchall()
+                logger.info(f"📊 Trouvé {len(accounts)} comptes à rafraîchir")
+
+                for account in accounts:
+                    account_id, user_id, refresh_token, expires_at = account
+                    
+                    logger.info(f"""
+                    🔄 Traitement du compte:
+                    ├── Account ID: {account_id}
+                    ├── User ID: {user_id}
+                    └── Expiration: {expires_at}
+                    """)
+
+                    if not refresh_token:
+                        logger.error(f"❌ Pas de refresh token pour {account_id}")
+                        continue
+
+                    # Rafraîchir le token
+                    new_tokens = self.refresh_token(refresh_token)
+                    if new_tokens:
+                        new_expires_at = datetime.utcnow() + timedelta(seconds=new_tokens['expires_in'])
+                        
+                        # Mettre à jour la base de données
+                        cur.execute("""
+                            UPDATE "SocialAccount"
+                            SET 
+                                "accessToken" = %s,
+                                "refreshToken" = %s,
+                                "tokenExpiresAt" = %s,
+                                "updatedAt" = %s
+                            WHERE id = %s
+                        """, (
+                            new_tokens['access_token'],
+                            new_tokens['refresh_token'],
+                            new_expires_at,
+                            datetime.utcnow(),
+                            account_id
+                        ))
+                        
+                        conn.commit()
+                        logger.info(f"""
+                        ✅ Token mis à jour:
+                        ├── Account ID: {account_id}
+                        └── Nouvelle expiration: {new_expires_at}
+                        """)
+                    else:
+                        logger.error(f"❌ Échec du rafraîchissement pour {account_id}")
+
+                cur.close()
+                conn.close()
+
+            except Exception as e:
+                logger.error(f"""
+                ❌ Erreur dans la boucle de rafraîchissement:
+                ├── Type: {type(e).__name__}
+                └── Message: {str(e)}
+                """)
+            
+            # Vérifier toutes les heures
+            logger.info("💤 Pause de 1 heure avant prochaine vérification...")
+            time.sleep(3600)
+
+
+# initialisation de l'application
+token_refresher = TikTokTokenRefresher()
+
 # Initialiser l'auto-scheduler au démarrage
 video_scheduler = VideoAutoScheduler()
 
