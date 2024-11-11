@@ -179,7 +179,6 @@ class VideoAutoScheduler:
 
 
 
-
 class TikTokTokenRefresher:
     def __init__(self):
         logger.info("🔄 Démarrage du TikTokTokenRefresher")
@@ -307,7 +306,7 @@ class TikTokTokenRefresher:
             
             # Vérifier toutes les heures
             logger.info("💤 Pause de 1 heure avant prochaine vérification...")
-            time.sleep(300)
+            time.sleep(3600)
 
 
 # initialisation de l'application
