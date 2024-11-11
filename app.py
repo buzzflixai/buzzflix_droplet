@@ -39,15 +39,40 @@ class VideoAutoScheduler:
         self.worker.start()
         logger.info("✅ Thread de surveillance démarré")
 
+    def trigger_lambda(self, payload):
+        try:
+            logger.info(f"""
+            🚀 Envoi à Lambda:
+            ├── Video ID: {payload['video_id']}
+            ├── Series ID: {payload['series_id']}
+            └── Theme: {payload['theme']}
+            """)
+
+            response = requests.post(
+                os.getenv('AWS_LAMBDA_ENDPOINT'),
+                json=payload,
+                headers={'Content-Type': 'application/json'},
+                timeout=1
+            )
+            logger.info("✅ Lambda déclenché avec succès (timeout attendu)")
+        except requests.exceptions.Timeout:
+            logger.info("⏱️ Lambda timeout (normal)")
+        except Exception as e:
+            logger.error(f"""
+            ❌ Erreur Lambda:
+            ├── Video ID: {payload['video_id']}
+            ├── Type: {type(e).__name__}
+            └── Message: {str(e)}
+            """)
+
     def check_and_create_videos(self):
-        logger.info("🔄 Démarrage de la boucle de vérification des vidéos")
+        """Vérifie périodiquement les séries qui ont besoin d'une nouvelle vidéo"""
         while True:
             try:
                 conn = get_db_connection()
                 cur = conn.cursor()
                 logger.info("🔍 Recherche des séries actives...")
 
-                # Vérifier les séries qui nécessitent une nouvelle vidéo
                 cur.execute("""
                     SELECT 
                         s.id, s."userId", s.theme, s."destinationType",
@@ -66,53 +91,36 @@ class VideoAutoScheduler:
                 """)
                 
                 series_list = cur.fetchall()
-                logger.info(f"📊 {len(series_list)} séries actives trouvées")
+                logger.info(f"📊 Trouvé {len(series_list)} séries actives")
                 current_time = datetime.utcnow()
-
                 for series in series_list:
                     (series_id, user_id, theme, dest_type, dest_id, dest_email, 
                      voice, language, duration_range, frequency, plan_name, last_video_date) = series
 
                     logger.info(f"""
-                    📝 Analyse de la série:
-                    ├── ID: {series_id}
-                    ├── User: {user_id}
+                    📝 Analyse de la série {series_id}:
                     ├── Plan: {plan_name}
                     ├── Dernière vidéo: {last_video_date}
                     └── Fréquence: {frequency} vidéos/semaine
                     """)
 
-                    # Calculer la prochaine date
+                    # Calculer quand la prochaine vidéo devrait être créée
                     days_between = 7 / frequency
                     next_video_date = last_video_date + timedelta(days=days_between)
-                    
-                    logger.info(f"""
-                    ⏰ Calcul des dates:
-                    ├── Date actuelle: {current_time}
-                    ├── Dernière vidéo: {last_video_date}
-                    ├── Intervalle: {days_between} jours
-                    ├── Prochaine vidéo prévue: {next_video_date}
-                    └── Délai restant: {next_video_date - current_time}
-                    """)
 
-                    # Si c'est l'heure
                     if current_time >= next_video_date:
-                        logger.info(f"⚡ Heure de créer une nouvelle vidéo pour la série {series_id}")
-                        
-                        # Vérifier les vidéos en attente
+                        # Vérifier d'abord s'il n'y a pas déjà une vidéo en cours
                         cur.execute("""
-                            SELECT id, status, "createdAt"
-                            FROM "Video"
+                            SELECT COUNT(*) FROM "Video"
                             WHERE "seriesId" = %s AND status = 'pending'
                         """, (series_id,))
                         
-                        pending_videos = cur.fetchall()
-                        logger.info(f"🔍 Vidéos en attente trouvées: {len(pending_videos)}")
+                        pending_count = cur.fetchone()[0]
                         
-                        if not pending_videos:
-                            logger.info(f"✨ Création d'une nouvelle vidéo pour la série {series_id}")
+                        if pending_count == 0:
+                            logger.info(f"⚡ Création d'une nouvelle vidéo pour {series_id}")
                             
-                            # Créer la vidéo
+                            # Créer une nouvelle vidéo
                             video_id = str(uuid.uuid4())
                             cur.execute("""
                                 INSERT INTO "Video" (id, "seriesId", status, "createdAt", "updatedAt")
@@ -120,9 +128,9 @@ class VideoAutoScheduler:
                             """, (video_id, series_id, current_time, current_time))
 
                             conn.commit()
-                            logger.info(f"💾 Vidéo créée en base de données: {video_id}")
+                            logger.info(f"💾 Vidéo créée: {video_id}")
 
-                            # Préparer Lambda
+                            # Déclencher Lambda immédiatement
                             lambda_payload = {
                                 'user_id': user_id,
                                 'series_id': series_id,
@@ -135,82 +143,37 @@ class VideoAutoScheduler:
                                 'language': language,
                                 'duration_range': duration_range
                             }
-
-                            logger.info(f"""
-                            📦 Payload Lambda préparé:
-                            ├── Video ID: {video_id}
-                            ├── Theme: {theme}
-                            ├── Language: {language}
-                            └── Destination: {dest_type}
-                            """)
-
-                            # Déclencher Lambda
+                            
                             self.trigger_lambda(lambda_payload)
                             
                             logger.info(f"""
-                            ✅ Nouvelle vidéo programmée avec succès:
-                            ├── Series ID: {series_id}
+                            ✅ Nouvelle vidéo traitée:
                             ├── Video ID: {video_id}
-                            ├── User ID: {user_id}
-                            ├── Plan: {plan_name}
-                            ├── Date de création: {current_time}
-                            └── Prochaine vérification dans 5 minutes
+                            ├── Series ID: {series_id}
+                            └── Prochaine vérification dans: {days_between} jours
                             """)
                         else:
-                            logger.info(f"""
-                            ⏳ Vidéos en attente existantes:
-                            ├── Series ID: {series_id}
-                            ├── Nombre: {len(pending_videos)}
-                            └── Détails: {pending_videos}
-                            """)
+                            logger.info(f"⏳ Vidéo déjà en cours pour {series_id}")
                     else:
-                        logger.info(f"⏳ Trop tôt pour série {series_id}, prochaine vidéo dans {next_video_date - current_time}")
+                        time_to_next = next_video_date - current_time
+                        logger.info(f"⌛ Trop tôt pour {series_id}, prochaine vidéo dans {time_to_next}")
 
                 logger.info("✅ Cycle de vérification terminé")
-                cur.close()
-                conn.close()
 
             except Exception as e:
                 logger.error(f"""
                 ❌ Erreur dans le scheduler:
                 ├── Type: {type(e).__name__}
-                ├── Message: {str(e)}
-                └── Détails: {getattr(e, 'pgerror', 'N/A')}
+                └── Message: {str(e)}
                 """, exc_info=True)
+            finally:
+                if 'cur' in locals():
+                    cur.close()
+                if 'conn' in locals():
+                    conn.close()
             
-            logger.info("💤 Pause de 5 minutes avant la prochaine vérification...")
+            logger.info("💤 Pause de 5 minutes...")
             time.sleep(300)
-
-    def trigger_lambda(self, payload):
-        try:
-            logger.info(f"""
-            🚀 Envoi à Lambda:
-            ├── Video ID: {payload['video_id']}
-            ├── Series ID: {payload['series_id']}
-            └── URL: {os.getenv('AWS_LAMBDA_ENDPOINT')}
-            """)
-
-            response = requests.post(
-                os.getenv('AWS_LAMBDA_ENDPOINT'),
-                json=payload,
-                headers={'Content-Type': 'application/json'},
-                timeout=1
-            )
-            logger.info(f"""
-            ✅ Lambda déclenché:
-            ├── Status: {response.status_code if response else 'Timeout (normal)'}
-            └── Video ID: {payload['video_id']}
-            """)
-        except requests.exceptions.Timeout:
-            logger.info(f"⏱️ Lambda timeout (normal) pour video_id: {payload['video_id']}")
-        except Exception as e:
-            logger.error(f"""
-            ❌ Erreur Lambda:
-            ├── Video ID: {payload['video_id']}
-            ├── Type: {type(e).__name__}
-            └── Message: {str(e)}
-            """)
-
 
 # Initialiser l'auto-scheduler au démarrage
 video_scheduler = VideoAutoScheduler()
@@ -220,136 +183,90 @@ def create_series():
     try:
         data = request.json
         series_id = data.get('series_id')
+        video_id = data.get('video_id')  # On s'attend à recevoir l'ID de la vidéo créée par Next.js
+        
         logger.info(f"""
-        📨 Nouvelle requête create_series reçue:
+        📨 Nouvelle requête create_series:
         ├── Series ID: {series_id}
-        ├── Headers: {dict(request.headers)}
-        └── Data: {json.dumps(data, indent=2)}
+        └── Video ID: {video_id}
         """)
 
-        # Créer la première vidéo
         conn = get_db_connection()
         cur = conn.cursor()
 
         try:
-            logger.info(f"🔍 Vérification de la série {series_id} dans la base de données...")
-            # Vérifier la série avec plus de détails
+            # Vérifier que la vidéo existe et est en statut pending
             cur.execute("""
                 SELECT 
-                    s."userId", s.theme, s."destinationType", s."destinationId", 
+                    s."userId", s.theme, s."destinationType", s."destinationId",
                     s."destinationEmail", s.voice, s.language, s."durationRange",
-                    s.frequency, s.status,
-                    u.email as user_email,
-                    COALESCE(sub.status, 'inactive') as subscription_status,
-                    COALESCE(p.name, 'none') as plan_name
-                FROM "Series" s
-                JOIN "User" u ON s."userId" = u.id
-                LEFT JOIN "Subscription" sub ON u.id = sub."userId"
-                LEFT JOIN "Plan" p ON sub."planId" = p.id
-                WHERE s.id = %s
-            """, (series_id,))
+                    v.status
+                FROM "Video" v
+                JOIN "Series" s ON v."seriesId" = s.id
+                WHERE v.id = %s AND s.id = %s
+            """, (video_id, series_id))
             
-            series = cur.fetchone()
-            if not series:
-                logger.error(f"❌ Série {series_id} non trouvée dans la base de données")
-                return jsonify({'status': 'error', 'message': 'Series not found'}), 404
-
-            logger.info(f"""
-            ✅ Série trouvée:
-            ├── User ID: {series[0]}
-            ├── User Email: {series[10]}
-            ├── Theme: {series[1]}
-            ├── Destination: {series[2]}
-            ├── Status: {series[9]}
-            ├── Subscription: {series[11]}
-            ├── Plan: {series[12]}
-            └── Fréquence: {series[8]} vidéos/semaine
-            """)
-
-            # Vérifier s'il n'y a pas déjà une vidéo en cours
-            cur.execute("""
-                SELECT id, status, "createdAt"
-                FROM "Video"
-                WHERE "seriesId" = %s AND status = 'pending'
-            """, (series_id,))
+            video = cur.fetchone()
             
-            existing_videos = cur.fetchall()
-            if existing_videos:
-                logger.warning(f"""
-                ⚠️ Vidéos en attente détectées:
+            if not video:
+                logger.error(f"""
+                ❌ Vidéo non trouvée:
                 ├── Series ID: {series_id}
-                └── Vidéos: {existing_videos}
+                └── Video ID: {video_id}
                 """)
-            
-            # Créer la première vidéo
-            video_id = str(uuid.uuid4())
-            current_time = datetime.utcnow()
-            
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Video not found'
+                }), 404
+
+            if video[8] != 'pending':
+                logger.error(f"❌ La vidéo {video_id} n'est pas en statut pending")
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Video not in pending status'
+                }), 400
+
             logger.info(f"""
-            📼 Création de la première vidéo:
+            ✅ Vidéo trouvée:
             ├── Video ID: {video_id}
             ├── Series ID: {series_id}
-            ├── Date: {current_time}
-            └── Status: pending
+            ├── Theme: {video[1]}
+            └── Status: {video[8]}
             """)
-            
-            cur.execute("""
-                INSERT INTO "Video" (id, "seriesId", status, "createdAt", "updatedAt")
-                VALUES (%s, %s, 'pending', %s, %s)
-                RETURNING id
-            """, (video_id, series_id, current_time, current_time))
-            
-            conn.commit()
-            logger.info("💾 Vidéo enregistrée en base de données")
 
-            # Préparer et déclencher Lambda
+            # Déclencher Lambda
             lambda_payload = {
-                'user_id': series[0],
+                'user_id': video[0],
                 'series_id': series_id,
                 'video_id': video_id,
-                'destination': series[2],
-                'destination_id': series[3],
-                'destination_email': series[4],
-                'theme': series[1],
-                'voice': series[5],
-                'language': series[6],
-                'duration_range': series[7]
+                'destination': video[2],
+                'destination_id': video[3],
+                'destination_email': video[4],
+                'theme': video[1],
+                'voice': video[5],
+                'language': video[6],
+                'duration_range': video[7]
             }
-
-            logger.info(f"""
-            🚀 Préparation du payload Lambda:
-            ├── Video ID: {video_id}
-            ├── User ID: {series[0]}
-            ├── Theme: {series[1]}
-            ├── Destination: {series[2]}
-            └── Language: {series[6]}
-            """)
 
             video_scheduler.trigger_lambda(lambda_payload)
 
-            response_data = {
-                'status': 'success',
-                'message': 'Series started, videos will be generated automatically',
-                'data': {
-                    'first_video_id': video_id,
-                    'user_id': series[0],
-                    'frequency': series[8],
-                    'plan': series[12]
-                }
-            }
-
             logger.info(f"""
-            ✅ Série initialisée avec succès:
+            ✅ Traitement initié:
             ├── Series ID: {series_id}
-            ├── First Video ID: {video_id}
-            ├── Plan: {series[12]}
-            └── Response: {json.dumps(response_data, indent=2)}
+            ├── Video ID: {video_id}
+            └── Lambda: déclenché
             """)
 
-            return jsonify(response_data)
+            return jsonify({
+                'status': 'success',
+                'message': 'Video generation started',
+                'data': {
+                    'video_id': video_id,
+                    'series_id': series_id
+                }
+            })
 
         finally:
-            logger.info("🔄 Fermeture des connexions DB")
             cur.close()
             conn.close()
 
@@ -359,18 +276,13 @@ def create_series():
         ├── Type: {type(e).__name__}
         ├── Message: {str(e)}
         ├── Series ID: {series_id if 'series_id' in locals() else 'N/A'}
-        ├── Request Data: {json.dumps(request.json) if request.json else 'N/A'}
-        └── Stack Trace: 
+        └── Video ID: {video_id if 'video_id' in locals() else 'N/A'}
         """, exc_info=True)
         
         return jsonify({
             'status': 'error',
-            'message': 'Internal server error',
-            'error_type': type(e).__name__,
-            'error_details': str(e)
+            'message': 'Internal server error'
         }), 500
-
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
