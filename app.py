@@ -42,8 +42,6 @@ class EmailNotifier:
         logger.info("📧 Initialisation du système de notification email")
         self.sender_email = os.getenv('GMAIL_USER')
         self.sender_password = os.getenv('GMAIL_APP_PASSWORD')
-        
-        # Test de la connexion
         try:
             self._test_connection()
             logger.info("✅ Configuration email validée")
@@ -63,52 +61,69 @@ class EmailNotifier:
         """Envoie une notification pour une nouvelle vidéo"""
         try:
             logger.info(f"📧 Envoi de notification pour video_id: {video_info.get('video_id')}")
-            
-            # Création du message
             message = MIMEMultipart()
             message["From"] = self.sender_email
             message["To"] = video_info['user_email']
-            message["Subject"] = f"Nouvelle vidéo Buzzflix créée : {video_info.get('theme', 'Sans titre')}"
+            message["Subject"] = f"🎉 Your New TikTok Video is Ready! - {video_info.get('theme', 'Untitled')}"
 
-            # Corps du message
+            series_url = f"https://www.buzzflix.ai/dashboard/series/{video_info.get('series_id')}"
+            
             body = f"""
             <html>
-                <body>
-                    <h2>🎥 Nouvelle vidéo créée</h2>
-                    <p>Votre nouvelle vidéo a été générée avec succès !</p>
-                    
-                    <h3>📝 Détails :</h3>
-                    <ul>
-                        <li><strong>Thème :</strong> {video_info.get('theme', 'N/A')}</li>
-                        <li><strong>Langue :</strong> {video_info.get('language', 'N/A')}</li>
-                        <li><strong>Destination :</strong> {video_info.get('destination', 'N/A')}</li>
-                    </ul>
+            <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #333;">
+                <div style="text-align: center; background-color: #f8f9fa; padding: 20px; border-radius: 10px;">
+                    <h1 style="color: #2d3748; margin-bottom: 20px;">🎬 Your Video is Ready!</h1>
+                    <p style="font-size: 16px; line-height: 1.5;">We're excited to let you know that your new TikTok video has been successfully generated and is ready for review!</p>
+                </div>
 
-                    <p>Statut : ✅ Complété</p>
-                    
-                    <hr>
-                    <p style="color: gray; font-size: 12px;">
-                        Ceci est un message automatique de Buzzflix.
-                        Ne pas répondre à cet email.
+                <div style="margin-top: 30px; background-color: white; padding: 20px; border-radius: 10px; border: 1px solid #e2e8f0;">
+                    <h2 style="color: #4a5568; border-bottom: 2px solid #e2e8f0; padding-bottom: 10px;">📊 Video Details</h2>
+                    <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
+                        <tr>
+                            <td style="padding: 8px 0; color: #718096;"><strong>Theme:</strong></td>
+                            <td style="padding: 8px 0;">{video_info.get('theme', 'N/A')}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px 0; color: #718096;"><strong>Language:</strong></td>
+                            <td style="padding: 8px 0;">{video_info.get('language', 'N/A')}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px 0; color: #718096;"><strong>Platform:</strong></td>
+                            <td style="padding: 8px 0;">{video_info.get('destination', 'N/A')}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px 0; color: #718096;"><strong>Status:</strong></td>
+                            <td style="padding: 8px 0;">✅ Complete</td>
+                        </tr>
+                    </table>
+                </div>
+
+                <div style="text-align: center; margin-top: 30px;">
+                    <a href="{series_url}" style="background-color: #4a90e2; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">View Your Series Dashboard</a>
+                </div>
+
+                <div style="margin-top: 40px; text-align: center; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+                    <p style="color: #718096; font-size: 12px;">
+                        This is an automated message from Buzzflix.<br>
+                        Please do not reply to this email.
                     </p>
-                </body>
+                </div>
+            </body>
             </html>
             """
 
             message.attach(MIMEText(body, "html"))
 
-            # Envoi du message
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
                 server.login(self.sender_email, self.sender_password)
                 server.send_message(message)
-
+                
             logger.info(f"""
             ✅ Notification envoyée:
             ├── Video ID: {video_info.get('video_id')}
             ├── User Email: {video_info['user_email']}
             └── Theme: {video_info.get('theme')}
             """)
-
         except Exception as e:
             logger.error(f"""
             ❌ Erreur d'envoi de notification:
