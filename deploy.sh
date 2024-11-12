@@ -70,11 +70,12 @@ cd $APP_DIR
 python3 -m venv venv
 source venv/bin/activate
 
-# Dans la section d'installation des dépendances Python, remplacer par :
 log "Installation des dépendances Python..."
 pip install --upgrade pip
 pip install wheel
-pip install flask flask-cors requests "gunicorn[gthread]" psycopg2-binary python-dotenv
+pip install flask flask-cors requests "gunicorn[gthread]" \
+    psycopg2-binary python-dotenv \
+    secure-smtplib email-validator
 
 
 # Copie des fichiers
@@ -103,6 +104,8 @@ WorkingDirectory=$APP_DIR
 Environment="PATH=$APP_DIR/venv/bin:/usr/bin"
 Environment="PYTHONPATH=$APP_DIR"
 Environment="PYTHONUNBUFFERED=1"
+Environment="GMAIL_USER=${GMAIL_USER}"
+Environment="GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}"
 EnvironmentFile=$APP_DIR/.env
 
 ExecStart=$APP_DIR/venv/bin/gunicorn app:app \
@@ -143,6 +146,22 @@ if ! psql "$DATABASE_URL" -c '\q' 2>/dev/null; then
     error "Impossible de se connecter à la base de données. Vérifiez DATABASE_URL dans .env"
     exit 1
 fi
+
+# Test de la connexion SMTP Gmail
+log "Test de la connexion SMTP..."
+python3 -c "
+import smtplib
+try:
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+        server.login('$GMAIL_USER', '$GMAIL_APP_PASSWORD')
+    print('SMTP connection successful')
+except Exception as e:
+    print(f'SMTP connection failed: {str(e)}')
+    exit(1)
+" || {
+    error "Impossible de se connecter au serveur SMTP Gmail. Vérifiez vos identifiants."
+    exit 1
+}
 
 # Démarrage du service
 log "Démarrage du service..."

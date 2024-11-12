@@ -12,6 +12,10 @@ from threading import Thread
 import time
 from dotenv import load_dotenv
 import psycopg2
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
 
 # Configuration
 load_dotenv()
@@ -31,6 +35,88 @@ executor = ThreadPoolExecutor(max_workers=10)
 
 def get_db_connection():
     return psycopg2.connect(db_url)
+
+
+class EmailNotifier:
+    def __init__(self):
+        logger.info("📧 Initialisation du système de notification email")
+        self.sender_email = os.getenv('GMAIL_USER')
+        self.sender_password = os.getenv('GMAIL_APP_PASSWORD')
+        
+        # Test de la connexion
+        try:
+            self._test_connection()
+            logger.info("✅ Configuration email validée")
+        except Exception as e:
+            logger.error(f"""
+            ❌ Erreur de configuration email:
+            ├── Type: {type(e).__name__}
+            └── Message: {str(e)}
+            """)
+
+    def _test_connection(self):
+        """Teste la connexion SMTP"""
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(self.sender_email, self.sender_password)
+
+    def send_video_notification(self, video_info: dict):
+        """Envoie une notification pour une nouvelle vidéo"""
+        try:
+            logger.info(f"📧 Envoi de notification pour video_id: {video_info.get('video_id')}")
+            
+            # Création du message
+            message = MIMEMultipart()
+            message["From"] = self.sender_email
+            message["To"] = video_info['user_email']
+            message["Subject"] = f"Nouvelle vidéo Buzzflix créée : {video_info.get('theme', 'Sans titre')}"
+
+            # Corps du message
+            body = f"""
+            <html>
+                <body>
+                    <h2>🎥 Nouvelle vidéo créée</h2>
+                    <p>Votre nouvelle vidéo a été générée avec succès !</p>
+                    
+                    <h3>📝 Détails :</h3>
+                    <ul>
+                        <li><strong>Thème :</strong> {video_info.get('theme', 'N/A')}</li>
+                        <li><strong>Langue :</strong> {video_info.get('language', 'N/A')}</li>
+                        <li><strong>Destination :</strong> {video_info.get('destination', 'N/A')}</li>
+                    </ul>
+
+                    <p>Statut : ✅ Complété</p>
+                    
+                    <hr>
+                    <p style="color: gray; font-size: 12px;">
+                        Ceci est un message automatique de Buzzflix.
+                        Ne pas répondre à cet email.
+                    </p>
+                </body>
+            </html>
+            """
+
+            message.attach(MIMEText(body, "html"))
+
+            # Envoi du message
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                server.login(self.sender_email, self.sender_password)
+                server.send_message(message)
+
+            logger.info(f"""
+            ✅ Notification envoyée:
+            ├── Video ID: {video_info.get('video_id')}
+            ├── User Email: {video_info['user_email']}
+            └── Theme: {video_info.get('theme')}
+            """)
+
+        except Exception as e:
+            logger.error(f"""
+            ❌ Erreur d'envoi de notification:
+            ├── Type: {type(e).__name__}
+            ├── Message: {str(e)}
+            └── Video ID: {video_info.get('video_id')}
+            """)
+
 
 class VideoAutoScheduler:
     def __init__(self):
@@ -54,12 +140,45 @@ class VideoAutoScheduler:
                 headers={'Content-Type': 'application/json'},
                 timeout=1
             )
-            logger.info("✅ Lambda déclenché avec succès (timeout attendu)")
+
+            # Récupérer l'email de l'utilisateur
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            try:
+                cur.execute("""
+                    SELECT u.email
+                    FROM "User" u
+                    JOIN "Series" s ON s."userId" = u.id
+                    WHERE s.id = %s
+                """, (payload['series_id'],))
+                
+                user_email = cur.fetchone()[0]
+
+                # Préparer les infos pour la notification
+                video_info = {
+                    'video_id': payload['video_id'],
+                    'series_id': payload['series_id'],
+                    'theme': payload['theme'],
+                    'language': payload['language'],
+                    'destination': payload['destination'],
+                    'user_email': user_email
+                }
+
+                # Envoyer la notification
+                email_notifier.send_video_notification(video_info)
+
+            finally:
+                cur.close()
+                conn.close()
+
+            logger.info(f"✅ Lambda déclenché et notification envoyée pour video_id: {payload['video_id']}")
+            
         except requests.exceptions.Timeout:
             logger.info("⏱️ Lambda timeout (normal)")
         except Exception as e:
             logger.error(f"""
-            ❌ Erreur Lambda:
+            ❌ Erreur Lambda ou notification:
             ├── Video ID: {payload['video_id']}
             ├── Type: {type(e).__name__}
             └── Message: {str(e)}
@@ -314,6 +433,10 @@ token_refresher = TikTokTokenRefresher()
 
 # Initialiser l'auto-scheduler au démarrage
 video_scheduler = VideoAutoScheduler()
+
+# Initialiser le notifieur
+email_notifier = EmailNotifier()
+
 
 @app.route('/create_series', methods=['POST'])
 def create_series():
