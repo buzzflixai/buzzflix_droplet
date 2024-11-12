@@ -126,6 +126,7 @@ class VideoAutoScheduler:
         logger.info("✅ Thread de surveillance démarré")
 
     def trigger_lambda(self, payload):
+        """Déclenche Lambda et envoie une notification email"""
         try:
             logger.info(f"""
             🚀 Envoi à Lambda:
@@ -134,14 +135,20 @@ class VideoAutoScheduler:
             └── Theme: {payload['theme']}
             """)
 
-            response = requests.post(
-                os.getenv('AWS_LAMBDA_ENDPOINT'),
-                json=payload,
-                headers={'Content-Type': 'application/json'},
-                timeout=1
-            )
-
-            # Récupérer l'email de l'utilisateur
+            # Appel Lambda dans son propre try
+            try:
+                response = requests.post(
+                    os.getenv('AWS_LAMBDA_ENDPOINT'),
+                    json=payload,
+                    headers={'Content-Type': 'application/json'},
+                    timeout=1
+                )
+                logger.info("✅ Lambda déclenché avec succès")
+            except requests.exceptions.Timeout:
+                logger.info("⏱️ Lambda timeout (normal)")
+            
+            # Partie email indépendante de Lambda
+            logger.info("📧 Préparation de la notification email...")
             conn = get_db_connection()
             cur = conn.cursor()
             
@@ -153,7 +160,13 @@ class VideoAutoScheduler:
                     WHERE s.id = %s
                 """, (payload['series_id'],))
                 
-                user_email = cur.fetchone()[0]
+                result = cur.fetchone()
+                if result is None:
+                    logger.error("❌ Email utilisateur non trouvé")
+                    return
+                    
+                user_email = result[0]
+                logger.info(f"📧 Email trouvé: {user_email}")
 
                 # Préparer les infos pour la notification
                 video_info = {
@@ -167,23 +180,26 @@ class VideoAutoScheduler:
 
                 # Envoyer la notification
                 email_notifier.send_video_notification(video_info)
+                logger.info("✅ Email de notification envoyé")
 
+            except Exception as e:
+                logger.error(f"""
+                ❌ Erreur lors de l'envoi de l'email:
+                ├── Type: {type(e).__name__}
+                ├── Message: {str(e)}
+                └── Video ID: {payload['video_id']}
+                """)
             finally:
                 cur.close()
                 conn.close()
 
-            logger.info(f"✅ Lambda déclenché et notification envoyée pour video_id: {payload['video_id']}")
-            
-        except requests.exceptions.Timeout:
-            logger.info("⏱️ Lambda timeout (normal)")
         except Exception as e:
             logger.error(f"""
-            ❌ Erreur Lambda ou notification:
+            ❌ Erreur générale dans trigger_lambda:
             ├── Video ID: {payload['video_id']}
             ├── Type: {type(e).__name__}
             └── Message: {str(e)}
             """)
-
     def check_and_create_videos(self):
         """Vérifie périodiquement les séries qui ont besoin d'une nouvelle vidéo"""
         while True:
