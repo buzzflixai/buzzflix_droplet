@@ -215,6 +215,30 @@ class VideoAutoScheduler:
             ├── Type: {type(e).__name__}
             └── Message: {str(e)}
             """)
+
+    def cleanup_stuck_videos(self, cur, series_id, current_time):
+        """Nettoie les vidéos bloquées en pending depuis plus d'une heure"""
+        one_hour_ago = current_time - timedelta(hours=1)
+        
+        cur.execute("""
+            DELETE FROM "Video"
+            WHERE "seriesId" = %s 
+            AND status = 'pending'
+            AND "createdAt" < %s
+            RETURNING id
+        """, (series_id, one_hour_ago))
+        
+        deleted_videos = cur.fetchall()
+        if deleted_videos:
+            deleted_ids = [video[0] for video in deleted_videos]
+            logger.info(f"""
+            🧹 Nettoyage des vidéos bloquées:
+            ├── Series ID: {series_id}
+            └── Vidéos supprimées: {', '.join(deleted_ids)}
+            """)
+            return True
+        return False
+
     def check_and_create_videos(self):
         """Vérifie périodiquement les séries qui ont besoin d'une nouvelle vidéo"""
         while True:
@@ -243,6 +267,7 @@ class VideoAutoScheduler:
                 series_list = cur.fetchall()
                 logger.info(f"📊 Trouvé {len(series_list)} séries actives")
                 current_time = datetime.utcnow()
+                
                 for series in series_list:
                     (series_id, user_id, theme, dest_type, dest_id, dest_email, 
                      voice, language, duration_range, frequency, plan_name, last_video_date) = series
@@ -259,11 +284,16 @@ class VideoAutoScheduler:
                     next_video_date = last_video_date + timedelta(days=days_between)
 
                     if current_time >= next_video_date:
-                        # Vérifier d'abord s'il n'y a pas déjà une vidéo en cours
+                        # Vérifier et nettoyer les vidéos bloquées
+                        videos_cleaned = self.cleanup_stuck_videos(cur, series_id, current_time)
+                        conn.commit()
+
+                        # Vérifier s'il y a des vidéos en cours non bloquées
                         cur.execute("""
                             SELECT COUNT(*) FROM "Video"
                             WHERE "seriesId" = %s AND status = 'pending'
-                        """, (series_id,))
+                            AND "createdAt" >= %s
+                        """, (series_id, current_time - timedelta(hours=1)))
                         
                         pending_count = cur.fetchone()[0]
                         
