@@ -215,29 +215,47 @@ class VideoAutoScheduler:
             ├── Type: {type(e).__name__}
             └── Message: {str(e)}
             """)
-
     def cleanup_stuck_videos(self, cur, series_id, current_time):
         """Nettoie les vidéos bloquées en pending depuis plus d'une heure"""
-        one_hour_ago = current_time - timedelta(hours=1)
-        
-        cur.execute("""
-            DELETE FROM "Video"
-            WHERE "seriesId" = %s 
-            AND status = 'pending'
-            AND "createdAt" < %s
-            RETURNING id
-        """, (series_id, one_hour_ago))
-        
-        deleted_videos = cur.fetchall()
-        if deleted_videos:
-            deleted_ids = [video[0] for video in deleted_videos]
-            logger.info(f"""
-            🧹 Nettoyage des vidéos bloquées:
+        try:
+            one_hour_ago = current_time - timedelta(hours=1)
+            
+            # Exécuter le DELETE
+            cur.execute("""
+                DELETE FROM "Video"
+                WHERE "seriesId" = %s 
+                AND status = 'pending'
+                AND "createdAt" < %s
+                RETURNING id
+            """, (series_id, one_hour_ago))
+            
+            deleted_videos = cur.fetchall()
+            
+            if deleted_videos:
+                deleted_ids = [video[0] for video in deleted_videos]
+                logger.info(f"""
+                🧹 Nettoyage des vidéos bloquées:
+                ├── Series ID: {series_id}
+                └── Vidéos supprimées: {', '.join(deleted_ids)}
+                """)
+                
+                # Obtenir la connexion à partir du curseur et faire le COMMIT
+                cur.connection.commit()
+                logger.info(f"✅ Suppression confirmée dans la base de données pour les vidéos: {', '.join(deleted_ids)}")
+                return True
+                
+            return False
+            
+        except Exception as e:
+            logger.error(f"""
+            ❌ Erreur lors du nettoyage des vidéos:
             ├── Series ID: {series_id}
-            └── Vidéos supprimées: {', '.join(deleted_ids)}
+            ├── Type: {type(e).__name__}
+            └── Message: {str(e)}
             """)
-            return True
-        return False
+            # En cas d'erreur, on fait un rollback
+            cur.connection.rollback()
+            return False
 
     def check_and_create_videos(self):
         """Vérifie périodiquement les séries qui ont besoin d'une nouvelle vidéo"""
