@@ -575,7 +575,7 @@ def create_series():
             └── Status: {video[8]}
             """)
 
-            if plan == "FREE":
+            if plan == "FREEeee":
                 logger.info("🆓 Traitement pour utilisateur gratuit")
                 # Chercher une vidéo existante avec le même thème
                 cur.execute("""
@@ -691,6 +691,6 @@ def create_series():
             'message': 'Internal server error'
         }), 500
 
-        
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
