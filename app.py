@@ -216,9 +216,9 @@ class VideoAutoScheduler:
             └── Message: {str(e)}
             """)
     def cleanup_stuck_videos(self, cur, series_id, current_time):
-        """Nettoie les vidéos bloquées en pending depuis plus d'une heure"""
+        """Nettoie les vidéos bloquées en pending depuis plus de 2 heures"""
         try:
-            one_hour_ago = current_time - timedelta(hours=1)
+            one_hour_ago = current_time - timedelta(hours=2)
             
             # Exécuter le DELETE
             cur.execute("""
@@ -522,12 +522,14 @@ def create_series():
     try:
         data = request.json
         series_id = data.get('series_id')
-        video_id = data.get('video_id')  # On s'attend à recevoir l'ID de la vidéo créée par Next.js
+        video_id = data.get('video_id')
+        plan = data.get('plan')  # On récupère le plan de l'utilisateur depuis la requête
         
         logger.info(f"""
         📨 Nouvelle requête create_series:
         ├── Series ID: {series_id}
-        └── Video ID: {video_id}
+        ├── Video ID: {video_id}
+        └── Plan: {plan}
         """)
 
         conn = get_db_connection()
@@ -573,32 +575,98 @@ def create_series():
             └── Status: {video[8]}
             """)
 
-            # Déclencher Lambda
-            lambda_payload = {
-                'user_id': video[0],
-                'series_id': series_id,
-                'video_id': video_id,
-                'destination': video[2],
-                'destination_id': video[3],
-                'destination_email': video[4],
-                'theme': video[1],
-                'voice': video[5],
-                'language': video[6],
-                'duration_range': video[7]
-            }
+            if plan == "FREE":
+                logger.info("🆓 Traitement pour utilisateur gratuit")
+                # Chercher une vidéo existante avec le même thème
+                cur.execute("""
+                    SELECT v.title, v.description, v.script, v."fileUrl", v."thumbnailUrl"
+                    FROM "Video" v
+                    JOIN "Series" s ON v."seriesId" = s.id
+                    WHERE s.theme = %s
+                    AND v.status = 'completed'
+                    AND v."fileUrl" IS NOT NULL
+                    ORDER BY RANDOM()
+                    LIMIT 1
+                """, (video[1],))
+                
+                source_video = cur.fetchone()
+                if not source_video:
+                    logger.error(f"❌ Aucune vidéo source trouvée pour le thème: {video[1]}")
+                    return jsonify({
+                        'status': 'error',
+                        'message': 'No source video found for theme'
+                    }), 404
 
-            video_scheduler.trigger_lambda(lambda_payload)
-
-            logger.info(f"""
-            ✅ Traitement initié:
-            ├── Series ID: {series_id}
-            ├── Video ID: {video_id}
-            └── Lambda: déclenché
-            """)
+                # Mettre à jour la vidéo pending avec les données de la vidéo source
+                current_time = datetime.utcnow()
+                cur.execute("""
+                    UPDATE "Video"
+                    SET title = %s,
+                        description = %s,
+                        script = %s,
+                        "fileUrl" = %s,
+                        "thumbnailUrl" = %s,
+                        status = 'completed',
+                        "updatedAt" = %s
+                    WHERE id = %s
+                    RETURNING id
+                """, (
+                    source_video[0],  # title
+                    source_video[1],  # description
+                    source_video[2],  # script
+                    source_video[3],  # fileUrl
+                    source_video[4],  # thumbnailUrl
+                    current_time,
+                    video_id
+                ))
+                
+                conn.commit()
+                
+                # Préparer les infos pour la notification
+                video_info = {
+                    'video_id': video_id,
+                    'series_id': series_id,
+                    'theme': video[1],
+                    'language': video[6],
+                    'destination': video[2],
+                    'user_email': video[4]
+                }
+                
+                # Envoyer la notification
+                email_notifier.send_video_notification(video_info)
+                
+                logger.info(f"""
+                ✅ Vidéo gratuite traitée:
+                ├── Video ID: {video_id}
+                └── Series ID: {series_id}
+                """)
+            else:
+                logger.info("💫 Traitement pour utilisateur premium")
+                # Déclencher Lambda pour les utilisateurs premium
+                lambda_payload = {
+                    'user_id': video[0],
+                    'series_id': series_id,
+                    'video_id': video_id,
+                    'destination': video[2],
+                    'destination_id': video[3],
+                    'destination_email': video[4],
+                    'theme': video[1],
+                    'voice': video[5],
+                    'language': video[6],
+                    'duration_range': video[7]
+                }
+                
+                video_scheduler.trigger_lambda(lambda_payload)
+                
+                logger.info(f"""
+                ✅ Traitement Lambda initié:
+                ├── Video ID: {video_id}
+                └── Series ID: {series_id}
+                """)
 
             return jsonify({
                 'status': 'success',
-                'message': 'Video generation started',
+                'message': 'Video processing started',
                 'data': {
                     'video_id': video_id,
                     'series_id': series_id
@@ -623,5 +691,6 @@ def create_series():
             'message': 'Internal server error'
         }), 500
 
+        
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
