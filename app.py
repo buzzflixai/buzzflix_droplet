@@ -575,7 +575,7 @@ def create_series():
             └── Status: {video[8]}
             """)
 
-            if plan == "FREEeee":
+            if plan == "FREE":
                 logger.info("🆓 Traitement pour utilisateur gratuit")
                 # Chercher une vidéo existante avec le même thème
                 cur.execute("""
