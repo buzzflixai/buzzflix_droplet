@@ -301,9 +301,11 @@ class VideoAutoScheduler:
                     days_between = 7 / frequency
                     next_video_date = last_video_date + timedelta(days=days_between)
 
+                    videos_cleaned = self.cleanup_stuck_videos(cur, series_id, current_time)
+
+
                     if current_time >= next_video_date:
                         # Vérifier et nettoyer les vidéos bloquées
-                        videos_cleaned = self.cleanup_stuck_videos(cur, series_id, current_time)
                         conn.commit()
 
                         # Vérifier s'il y a des vidéos en cours non bloquées
