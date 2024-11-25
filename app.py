@@ -306,6 +306,7 @@ class VideoAutoScheduler:
 
                     if current_time >= next_video_date:
                         # Vérifier et nettoyer les vidéos bloquées
+                        videos_cleaned = self.cleanup_stuck_videos(cur, series_id, current_time)
                         conn.commit()
 
                         # Vérifier s'il y a des vidéos en cours non bloquées
@@ -623,6 +624,22 @@ def create_series():
                 ))
                 
                 conn.commit()
+
+                cur.execute("""
+                    SELECT u.email
+                    FROM "User" u
+                    JOIN "Series" s ON s."userId" = u.id
+                    WHERE s.id = %s
+                """, (series_id,))
+                
+                result = cur.fetchone()
+
+                if result is None:
+                    logger.error("❌ Email utilisateur non trouvé")
+                    return
+                    
+                user_email = result[0]
+
                 
                 # Préparer les infos pour la notification
                 video_info = {
@@ -631,7 +648,7 @@ def create_series():
                     'theme': video[1],
                     'language': video[6],
                     'destination': video[2],
-                    'user_email': video[4]
+                    'user_email': user_email
                 }
                 
                 # Envoyer la notification
